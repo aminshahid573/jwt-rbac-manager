@@ -1,6 +1,6 @@
 {
   "name": "jwt-rbac-manager",
-  "version": "1.0.2",
+  "version": "1.0.0",
   "description": "JWT token manager with role-based access control",
   "main": "index.js",
   "scripts": {
