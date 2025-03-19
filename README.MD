@@ -55,8 +55,8 @@ const path = require('path');
 
 const jwtManager = new JWTManager({
   algorithm: "RS256", // Algorithm used for signing (HS256, RS256, etc.)
-  privateKey: fs.readFileSync(path.join(__dirname, 'keys', 'private.pem')), // Private key for assymetric algo
-  publicKey: fs.readFileSync(path.join(__dirname, 'keys', 'public.pem')),// public key for assymetric algo
+  privateKey: fs.readFileSync(path.join(__dirname, 'keys', 'private.key')), // Private key for assymetric algo
+  publicKey: fs.readFileSync(path.join(__dirname, 'keys', 'public.key')),// public key for assymetric algo
   tokenExpiration: "1h", // Token expiration time
   refreshExpiration: "7d", // Refresh token expiration time
   issuer: "your-app", // Token issuer
