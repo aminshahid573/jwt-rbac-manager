@@ -1,5 +1,9 @@
 # JWT Role-Based Access Control Manager
 
+<p align="center">
+  <img src="https://img.shields.io/badge/Made%20With%20❤️%20By-Shahid%20Amin-blue?style=for-the-badge" alt="Made With Love">
+</p>
+
 ## Description
 
 `jwt-rbac-manager` is a comprehensive and flexible Node.js library for managing JSON Web Tokens (JWT) with Role-Based Access Control (RBAC). It simplifies the process of generating, verifying, refreshing, and invalidating JWTs, while also providing robust mechanisms for managing user roles and permissions. This library is designed to be highly customizable, secure, and easy to integrate into any Node.js application.
