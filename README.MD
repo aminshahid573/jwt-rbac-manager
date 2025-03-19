@@ -50,40 +50,13 @@ const jwtManager = new JWTManager({
 
 ```javascript
 const JWTManager = require("jwt-rbac-manager");
+const fs = require('fs');
+const path = require('path');
 
 const jwtManager = new JWTManager({
   algorithm: "RS256", // Algorithm used for signing (HS256, RS256, etc.)
-  privateKey: `-----BEGIN PRIVATE KEY-----
-  MIIDZTCCAk2gAwIBAgIJAJtxjUkexTIXMA0GCSqGSIb3DQEBCwUAMIHnMSEwCQYD
-  VQQGEwJVUzETMBEGA1UECAwCQ0ExEzARBgNVBAcMClNhbiBGcmFuY2lzY28xEjAQ
-  BgNVBAoMCVBvcnRleCBMdGQxEjAQBgNVBAsMCVNvZnR3YXJlIERldjEUMBIGA1UE
-  AwwLd3d3LmV4YW1wbGUxJTAjBgkqhkiG9w0BCQEWFHBvcnRleEBleGFtcGxlLmNv
-  bTAeFw0yMzA5MjAyMjUyNDlaFw0yNDA5MTkyMjUyNDlaMIHnMSEwCQYDVQQGEwJV
-  UzETMBEGA1UECAwCQ0ExEzARBgNVBAcMClNhbiBGcmFuY2lzY28xEjAQBgNVBAoM
-  CVBvcnRleCBMdGQxEjAQBgNVBAsMCVNvZnR3YXJlIERldjEUMBIGA1UEAwwLd3d3
-  LmV4YW1wbGUxJTAjBgkqhkiG9w0BCQEWFHBvcnRleEBleGFtcGxlLmNvbTCCASIw
-  DQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMBw4jXWEYhGz1s5M5J+fUiz8n9
-  jDk1u4/zLq6C3N69bT4fR2vX6qj1C6R0aB7XbL8jd0K35yN0+fP7/E3g/g3WwY1
-  +4V27r9w2E3XyKxz2vhm8C6T4j0P0w5eC80uO7pP4y1sX5B6Y7h5l2r2k+v4r2E
-  x+028l0a7/r3T9i/q8V9/Rk6wzXf8a6t402+Jt0N+eWc89m/G2aE/c54hXJ/m2l
-  W6H7d/h2hL8fP+GfX2/3x/uJ79k/xS6R5K5/p80q2X9sJ1q74/173pU17I+G437
-  9o0D4F5z9e+b8s1h422/8G9hXQIDAQABo1MwUTAdBgNVHQ4EFgQU7+VvV49p4bC
-  R8SdW6q4vK3mglkwHwYDVR0jBBgwFoAU7+VvV49p4bCR8SdW6q4vK3mglkwDwYD
-  VR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAViX8j9B8u8qR3Q/mS8r
-  N3L4H0JbW4lJ4T2jE4J260r48Qe7g355tG6t8/wA43Jq7X5uQ0U93y5/v+9zG8
-  72Q6/cWv1l2Q8z9i/P5y34V5XW4h6qV2R6y4V6U+8v1m9u6K9h1vG29V4v/G9B
-  4F9v38zV4N2vL8b/rF4T5P6W9p9tV8u4W6n4X6g7R7/t6G6S0W1v9c4/8H9n77
-  8G6V8z5L1w1l3u38f7R9A8H9B732x/0/29P8/7+z/v7u/Q8B8F8J9X8C9B71+7
-  /v76/w==
-  -----END PRIVATE KEY-----`, // Private key for assymetric algo
-  publicKey: `-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwHDiNdYRiEbPWzkzkj59
-SLPzfYw5NbuP8y6ugtzevW0+H0dr1+qo9QukdGge12y/I3dCt+cjdPnz+/xN4P4
-N1sGNfuFdu6/cNhN18isc9r4ZvAuk+I9D9MOXgvNLju6T+MtbF+QemO4eZdq9p
-Pr+K9hMftNvJdGu/690/Yv6vFff0ZOsM13/GurWNNviLdDfnlmPPZvxtmhP3Oe
-IVyf5tpVuh+3f4doS/Hz/hn19v98f7ie/ZP8UukeSuP6fNKtl/bCdau+P9e96
-VNeyPhuN+/aNA+Bec/Xvm/LNYeNtv/BvYV0CAwEAAQ==
------END PUBLIC KEY-----`,// public key for assymetric algo
+  privateKey: fs.readFileSync(path.join(__dirname, 'keys', 'private.pem')), // Private key for assymetric algo
+  publicKey: fs.readFileSync(path.join(__dirname, 'keys', 'public.pem')),// public key for assymetric algo
   tokenExpiration: "1h", // Token expiration time
   refreshExpiration: "7d", // Refresh token expiration time
   issuer: "your-app", // Token issuer
@@ -95,6 +68,7 @@ VNeyPhuN+/aNA+Bec/Xvm/LNYeNtv/BvYV0CAwEAAQ==
   },
   tokenBlacklist: null, // Example: Redis client
 });
+
 ```
 
 ### Generating Tokens
