@@ -20,7 +20,9 @@
 
 ## Installation
 
-`npm install jwt-rbac-manager`
+```powershell
+npm install jwt-rbac-manager
+```
 
 ## Usage
 
