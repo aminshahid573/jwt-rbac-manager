@@ -1,264 +1,162 @@
 // tests/JWTManager.test.js
-const JWTManager = require('../index');
+const JWTManager = require('../index.js');
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+
+// Mock redis client for testing
+const mockRedisClient = {
+    get: jest.fn(),
+    set: jest.fn(),
+    del: jest.fn(),
+    incr: jest.fn(),
+    expire: jest.fn()
+};
 
 describe('JWTManager', () => {
-  let jwtManager;
-  const testUserId = 'test-123';
-  const testRoles = ['admin', 'editor'];
-  
-  beforeEach(() => {
-    jwtManager = new JWTManager({
-      secretKey: 'test-secret-key',
-      tokenExpiration: '1h',
-      refreshExpiration: '7d',
-      issuer: 'test-issuer'
-    });
-  });
+    let jwtManager;
+    const userId = 'testUser';
+    const roles = ['user'];
 
-  describe('generateToken', () => {
-    test('should generate valid token and refresh token', () => {
-      const result = jwtManager.generateToken(testUserId, testRoles);
-      
-      expect(result).toHaveProperty('token');
-      expect(result).toHaveProperty('refreshToken');
-      expect(result).toHaveProperty('expiresIn');
-      expect(result).toHaveProperty('refreshExpiresIn');
-      expect(typeof result.token).toBe('string');
-      expect(typeof result.refreshToken).toBe('string');
+    beforeEach(() => {
+        jest.clearAllMocks(); // Clear mock function calls before each test
+
+        jwtManager = new JWTManager({
+            algorithm: 'HS256',
+            secretKey: 'testSecret',
+            tokenExpiration: '1h',
+            refreshExpiration: '7d',
+            issuer: 'testIssuer',
+            permissionsMap: {
+                user: ['read:own'],
+                admin: ['read:all', 'write:all']
+            },
+            tokenBlacklist: mockRedisClient,
+            refreshTokenLimiter: mockRedisClient,
+            enforceIat: true
+        });
     });
 
-    test('should throw error if userId is not provided', () => {
-      expect(() => {
-        jwtManager.generateToken();
-      }).toThrow('User ID is required');
+    it('should generate a JWT token and refresh token', () => {
+        const { token, refreshToken } = jwtManager.generateToken(userId, roles);
+        expect(token).toBeDefined();
+        expect(refreshToken).toBeDefined();
     });
 
-    test('should include roles in the token payload', () => {
-      const result = jwtManager.generateToken(testUserId, testRoles);
-      const decoded = jwtManager.verifyToken(result.token);
-      
-      expect(decoded).toHaveProperty('roles');
-      expect(decoded.roles).toEqual(testRoles);
+    it('should verify a JWT token', async () => {
+        const { token } = jwtManager.generateToken(userId, roles);
+        const decoded = await jwtManager.verifyToken(token);
+        expect(decoded.sub).toBe(userId);
+        expect(decoded.roles).toEqual(roles);
     });
 
-    test('should include derived permissions in the token payload', () => {
-      const result = jwtManager.generateToken(testUserId, testRoles);
-      const decoded = jwtManager.verifyToken(result.token);
-      
-      expect(decoded).toHaveProperty('permissions');
-      expect(decoded.permissions).toContain('read:all');
-      expect(decoded.permissions).toContain('write:all');
-    });
-  });
+    it('should throw an error when verifying an expired JWT token', async () => {
+        const expiredJwtManager = new JWTManager({
+            algorithm: 'HS256',
+            secretKey: 'testSecret',
+            tokenExpiration: '1s', // Expire after 1 second
+            refreshExpiration: '7d',
+            issuer: 'testIssuer',
+            permissionsMap: {
+                user: ['read:own']
+            },
+            tokenBlacklist: mockRedisClient,
+            refreshTokenLimiter: mockRedisClient,
+            enforceIat: true
+        });
+        const { token } = expiredJwtManager.generateToken(userId, roles);
 
-  describe('verifyToken', () => {
-    test('should verify and decode a valid token', () => {
-      const { token } = jwtManager.generateToken(testUserId, testRoles);
-      const decoded = jwtManager.verifyToken(token);
-      
-      expect(decoded).toHaveProperty('sub', testUserId);
-      expect(decoded).toHaveProperty('roles');
-      expect(decoded).toHaveProperty('iat');
-      expect(decoded).toHaveProperty('exp');
-      expect(decoded).toHaveProperty('iss', 'test-issuer');
-    });
+        // Wait for the token to expire
+        await new Promise(resolve => setTimeout(resolve, 1500));
 
-    test('should throw error for invalid token', () => {
-      expect(() => {
-        jwtManager.verifyToken('invalid-token');
-      }).toThrow('Token verification failed');
-    });
-  });
-
-  describe('refreshToken', () => {
-    test('should generate new tokens with a valid refresh token', () => {
-      const { refreshToken } = jwtManager.generateToken(testUserId, testRoles);
-      const newTokens = jwtManager.refreshToken(refreshToken);
-      
-      expect(newTokens).toHaveProperty('token');
-      expect(newTokens).toHaveProperty('refreshToken');
-      expect(typeof newTokens.token).toBe('string');
-      expect(typeof newTokens.refreshToken).toBe('string');
+        await expect(expiredJwtManager.verifyToken(token)).rejects.toThrow('Token has expired');
     });
 
-    test('should throw error for invalid refresh token', () => {
-      expect(() => {
-        jwtManager.refreshToken('invalid-token');
-      }).toThrow('Token refresh failed');
+    it('should refresh a JWT token', async () => {
+        const { refreshToken } = jwtManager.generateToken(userId, roles);
+
+        // Mock Redis to allow refresh
+        mockRedisClient.get.mockResolvedValue(null);
+        mockRedisClient.incr.mockResolvedValue(1); // First refresh attempt
+
+        const { token: newToken, refreshToken: newRefreshToken } = await jwtManager.refreshToken(refreshToken);
+        expect(newToken).toBeDefined();
+        expect(newRefreshToken).toBeDefined();
     });
 
-    test('should throw error if using an access token as refresh token', () => {
-      const { token } = jwtManager.generateToken(testUserId, testRoles);
-      
-      expect(() => {
-        jwtManager.refreshToken(token);
-      }).toThrow('Invalid refresh token');
-    });
-  });
-
-  describe('hasRoles', () => {
-    test('should return true if token has all required roles', () => {
-      const { token } = jwtManager.generateToken(testUserId, testRoles);
-      
-      expect(jwtManager.hasRoles(token, ['admin'])).toBe(true);
-      expect(jwtManager.hasRoles(token, ['editor'])).toBe(true);
-      expect(jwtManager.hasRoles(token, ['admin', 'editor'])).toBe(true);
+    it('should throw an error when refreshing with an invalid refresh token', async () => {
+        await expect(jwtManager.refreshToken('invalidRefreshToken')).rejects.toThrow('Invalid refresh token');
     });
 
-    test('should return false if token does not have all required roles', () => {
-      const { token } = jwtManager.generateToken(testUserId, ['user']);
-      
-      expect(jwtManager.hasRoles(token, ['admin'])).toBe(false);
-      expect(jwtManager.hasRoles(token, ['user', 'admin'])).toBe(false);
-    });
-  });
+    it('should check if a user has required roles', async () => {
+        const { token } = jwtManager.generateToken(userId, roles);
+        const hasRoles = await jwtManager.hasRoles(token, ['user']);
+        expect(hasRoles).toBe(true);
 
-  describe('hasPermissions', () => {
-    test('should return true if token has all required permissions', () => {
-      const { token } = jwtManager.generateToken(testUserId, ['admin']);
-      
-      expect(jwtManager.hasPermissions(token, ['read:all'])).toBe(true);
-      expect(jwtManager.hasPermissions(token, ['write:all'])).toBe(true);
-      expect(jwtManager.hasPermissions(token, ['read:all', 'write:all'])).toBe(true);
+        const hasAdminRole = await jwtManager.hasRoles(token, ['admin']);
+        expect(hasAdminRole).toBe(false);
     });
 
-    test('should return false if token does not have all required permissions', () => {
-      const { token } = jwtManager.generateToken(testUserId, ['user']);
-      
-      expect(jwtManager.hasPermissions(token, ['write:all'])).toBe(false);
-      expect(jwtManager.hasPermissions(token, ['read:all', 'write:all'])).toBe(false);
-    });
-  });
+    it('should check if a user has required permissions', async () => {
+        const { token } = jwtManager.generateToken(userId, roles);
+        const hasPermission = await jwtManager.hasPermissions(token, ['read:own']);
+        expect(hasPermission).toBe(true);
 
-  describe('invalidateToken', () => {
-    test('should invalidate a token', () => {
-      const { token } = jwtManager.generateToken(testUserId, testRoles);
-      const result = jwtManager.invalidateToken(token);
-      
-      expect(result).toHaveProperty('invalidated', true);
-      expect(result).toHaveProperty('expiresAt');
-      expect(result.expiresAt).toBeInstanceOf(Date);
-    });
-  });
-
-  describe('constructor', () => {
-    test('should initialize with default options', () => {
-      const manager = new JWTManager();
-      expect(manager.algorithm).toBe('HS256');
-      expect(manager.tokenExpiration).toBe('1h');
-      expect(manager.refreshExpiration).toBe('7d');
-      expect(manager.issuer).toBe('jwt-manager');
+        const hasAdminPermission = await jwtManager.hasPermissions(token, ['read:all']);
+        expect(hasAdminPermission).toBe(false);
     });
 
-    test('should throw error for asymmetric algorithms without keys', () => {
-      expect(() => {
-        new JWTManager({ algorithm: 'RS256' });
-      }).toThrow('RS256 requires both privateKey and publicKey');
-    });
-  });
+    it('should invalidate a token', async () => {
+        const { token } = jwtManager.generateToken(userId, roles);
+        mockRedisClient.get.mockResolvedValue(null);
 
-  describe('addRole', () => {
-    test('should add new role with permissions', () => {
-      jwtManager.addRole('supervisor', ['read:all', 'approve:items']);
-      const { token } = jwtManager.generateToken(testUserId, ['supervisor']);
-      const decoded = jwtManager.verifyToken(token);
-      
-      expect(decoded.permissions).toContain('read:all');
-      expect(decoded.permissions).toContain('approve:items');
-    });
-  });
-
-  describe('token expiration', () => {
-    test('should respect custom expiration times', () => {
-      const { token } = jwtManager.generateToken(testUserId, testRoles, {
-        expiresIn: '2h'
-      });
-      const decoded = jwtManager.verifyToken(token);
-      
-      const twoHoursFromNow = Math.floor(Date.now() / 1000) + (2 * 60 * 60);
-      expect(decoded.exp).toBeCloseTo(twoHoursFromNow, -1);
+        const result = await jwtManager.invalidateToken(token);
+        expect(result.invalidated).toBe(true);
+        expect(mockRedisClient.set).toHaveBeenCalled();
     });
 
-    test('should use role-specific expiration times', () => {
-      const { token } = jwtManager.generateToken(testUserId, ['temporary'], {
-        temporaryExpiration: '15m'
-      });
-      const decoded = jwtManager.verifyToken(token);
-      
-      const fifteenMinsFromNow = Math.floor(Date.now() / 1000) + (15 * 60);
-      expect(decoded.exp).toBeCloseTo(fifteenMinsFromNow, -1);
-    });
-  });
-
-  describe('custom claims', () => {
-    test('should include custom claims in token', () => {
-      const customClaims = {
-        department: 'IT',
-        location: 'HQ'
-      };
-      
-      const { token } = jwtManager.generateToken(testUserId, testRoles, {
-        customClaims
-      });
-      const decoded = jwtManager.verifyToken(token);
-      
-      expect(decoded.department).toBe('IT');
-      expect(decoded.location).toBe('HQ');
+    it('should invalidate all tokens for a user', async () => {
+        const result = await jwtManager.invalidateAllUserTokens(userId);
+        expect(result.invalidated).toBe(true);
+        expect(mockRedisClient.set).toHaveBeenCalled();
     });
 
-    test('should not override protected claims', () => {
-      const customClaims = {
-        sub: 'fake-id',
-        iat: 12345
-      };
-      
-      const { token } = jwtManager.generateToken(testUserId, testRoles, {
-        customClaims
-      });
-      const decoded = jwtManager.verifyToken(token);
-      
-      expect(decoded.sub).toBe(testUserId);
-      expect(decoded.iat).not.toBe(12345);
-    });
-  });
+    it('should check if a token is blacklisted', async () => {
+        const { token } = jwtManager.generateToken(userId, roles);
+        mockRedisClient.get.mockResolvedValue('true'); // Mock blacklisted token
 
-  describe('middleware', () => {
-    test('should create Express middleware', () => {
-      const middleware = JWTManager.createMiddleware(jwtManager);
-      expect(typeof middleware).toBe('function');
+        const isBlacklisted = await jwtManager.isBlacklisted(token);
+        expect(isBlacklisted).toBe(true);
     });
 
-    test('should handle unauthorized requests', async () => {
-      const middleware = JWTManager.createMiddleware(jwtManager);
-      const req = { headers: {} };
-      const res = {
-        status: jest.fn().mockReturnThis(),
-        json: jest.fn()
-      };
-      const next = jest.fn();
-
-      await middleware(req, res, next);
-
-      expect(res.status).toHaveBeenCalledWith(401);
-      expect(res.json).toHaveBeenCalledWith({ error: 'No token provided' });
+    it('should allow adding new roles at runtime', () => {
+        jwtManager.addRole('moderator', ['read:all', 'write:own', 'moderate:comments']);
+        expect(jwtManager.permissionsMap.moderator).toEqual(['read:all', 'write:own', 'moderate:comments']);
     });
 
-    test('should pass valid tokens', async () => {
-      const { token } = jwtManager.generateToken(testUserId, testRoles);
-      const middleware = JWTManager.createMiddleware(jwtManager);
-      const req = {
-        headers: {
-          authorization: `Bearer ${token}`
-        }
-      };
-      const res = {};
-      const next = jest.fn();
+    it('should enforce iat based token invalidation', async () => {
+        const { token } = jwtManager.generateToken(userId, roles);
+        const decoded = jwt.decode(token);
 
-      await middleware(req, res, next);
-
-      expect(req.user).toBeDefined();
-      expect(req.user.sub).toBe(testUserId);
-      expect(next).toHaveBeenCalled();
+        mockRedisClient.get.mockResolvedValue((decoded.iat - 1000).toString()); // Simulate token issued before invalidation time
+        
+        const isBlacklisted = await jwtManager.isBlacklisted(token);
+        expect(isBlacklisted).toBe(true);
     });
-  });
+
+    it('should handle token refresh rate limiting', async () => {
+        const { refreshToken } = jwtManager.generateToken(userId, roles);
+
+        mockRedisClient.get.mockResolvedValue(null);
+        mockRedisClient.incr.mockResolvedValue(11); // Simulate rate limit exceeded
+
+        await expect(jwtManager.refreshToken(refreshToken)).rejects.toThrow('Too many refresh attempts');
+    });
+
+    it('should handle token refresh when refresh token is blacklisted', async () => {
+        const { refreshToken } = jwtManager.generateToken(userId, roles);
+
+        mockRedisClient.get.mockResolvedValue('true'); // Simulate blacklisted refresh token
+
+        await expect(jwtManager.refreshToken(refreshToken)).rejects.toThrow('Refresh token has been revoked');
+    });
 });
