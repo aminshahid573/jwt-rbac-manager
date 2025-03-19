@@ -1,8 +1,16 @@
 # JWT Role-Based Access Control Manager
 
 <p align="center">
+  <img src="https://img.shields.io/github/license/aminshahid573/jwt-rbac-manager?style=for-the-badge" alt="License">
+  <img src="https://img.shields.io/github/stars/aminshahid573/jwt-rbac-manager?style=for-the-badge" alt="GitHub stars">
+  <img src="https://img.shields.io/github/issues/aminshahid573/jwt-rbac-manager?style=for-the-badge" alt="GitHub issues">
+  <img src="https://img.shields.io/npm/v/jwt-rbac-manager?style=for-the-badge" alt="NPM Version">
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/Made%20With%20❤️%20By-Shahid%20Amin-blue?style=for-the-badge" alt="Made With Love">
 </p>
+
 
 ## Description
 
