@@ -1,5 +1,17 @@
 # JWT Role-Based Access Control Manager
 
+<p align="center">
+  <img src="https://img.shields.io/github/license/aminshahid573/jwt-rbac-manager?style=for-the-badge" alt="License">
+  <img src="https://img.shields.io/github/stars/aminshahid573/jwt-rbac-manager?style=for-the-badge" alt="GitHub stars">
+  <img src="https://img.shields.io/github/issues/aminshahid573/jwt-rbac-manager?style=for-the-badge" alt="GitHub issues">
+  <img src="https://img.shields.io/npm/v/jwt-rbac-manager?style=for-the-badge" alt="NPM Version">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Made%20With%20❤️%20By-Shahid%20Amin-blue?style=for-the-badge" alt="Made With Love">
+</p>
+
+
 ## Description
 
 `jwt-rbac-manager` is a comprehensive and flexible Node.js library for managing JSON Web Tokens (JWT) with Role-Based Access Control (RBAC). It simplifies the process of generating, verifying, refreshing, and invalidating JWTs, while also providing robust mechanisms for managing user roles and permissions. This library is designed to be highly customizable, secure, and easy to integrate into any Node.js application.
@@ -20,7 +32,9 @@
 
 ## Installation
 
-`npm install jwt-rbac-manager`
+```powershell
+npm install jwt-rbac-manager
+```
 
 ## Usage
 
@@ -43,6 +57,30 @@ const jwtManager = new JWTManager({
   },
   tokenBlacklist: null, // Example: Redis client
 });
+```
+## If Using asymmetric Algorith
+
+```javascript
+const JWTManager = require("jwt-rbac-manager");
+const fs = require('fs');
+const path = require('path');
+
+const jwtManager = new JWTManager({
+  algorithm: "RS256", // Algorithm used for signing (HS256, RS256, etc.)
+  privateKey: fs.readFileSync(path.join(__dirname, 'keys', 'private.key')), // Private key for assymetric algo
+  publicKey: fs.readFileSync(path.join(__dirname, 'keys', 'public.key')),// public key for assymetric algo
+  tokenExpiration: "1h", // Token expiration time
+  refreshExpiration: "7d", // Refresh token expiration time
+  issuer: "your-app", // Token issuer
+  permissionsMap: {
+    // Define roles and their permissions
+    admin: ["read:all", "write:all", "delete:all"],
+    editor: ["read:all", "write:own"],
+    user: ["read:own"],
+  },
+  tokenBlacklist: null, // Example: Redis client
+});
+
 ```
 
 ### Generating Tokens
