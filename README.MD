@@ -338,33 +338,255 @@ The library throws custom error classes for different scenarios:
 
 You can catch these errors and handle them accordingly in your application.
 
-## Redis Integration (Optional)
+## JWT-RBAC Manager: Token Blacklisting and Refresh Token Rate Limiting
 
-To enable token blacklisting and refresh token rate limiting, you can integrate with Redis.
+This section of the README focuses on how to configure and use the token blacklisting and refresh token rate limiting features of the JWT-RBAC Manager.
 
-1.  Install the `redis` package:
+### Configuration
+To enable token blacklisting and refresh token rate limiting, you must configure the `tokenBlacklist` and `refreshTokenLimiter` options when initializing the `JWTManager`. This requires providing a storage adapter instance (e.g., RedisAdapter, MongoAdapter, SqlAdapter).
 
-    ```powershell
-    npm install redis
-    ```
+#### Supported Storage
+1. **In-Memory (Default):** This works out of the box but is not suitable for distributed environments.
+2. **Redis:** Recommended for production environments due to its performance and scalability.
+3. **MongoDB/SQL:** Suitable for applications already using these databases.
 
-2.  Configure the `JWTManager` with a Redis client:
+```javascript
+const { JWTManager, RedisAdapter } = require('jwt-rbac-manager');
+const redis = require('redis');
+const client = redis.createClient();
 
-    ```javascript
-    const redis = require('redis');
-    const JWTManager = require('jwt-rbac-manager');
+const jwtManager = new JWTManager({
+    tokenBlacklist: new RedisAdapter(client),
+    refreshTokenLimiter: new RedisAdapter(client)
+});
+```
 
-    const redisClient = redis.createClient({
-        host: 'localhost',
-        port: 6379
-    });
+### Token Blacklisting
 
-    const jwtManager = new JWTManager({
-        // ... other options
-        tokenBlacklist: redisClient,
-        refreshTokenLimiter: redisClient
-    });
-    ```
+#### Overview
+Token blacklisting is a critical security feature that allows you to immediately invalidate JWTs, even before their natural expiration. This is essential for scenarios like user logout, account compromise, or any situation requiring immediate token revocation.
+
+#### Implementation Details
+1. **Invalidate Token:** When a user logs out or an event requires token revocation, call the `invalidateToken(token)` function. This function adds the token's JTI (JWT ID) to the blacklist with a TTL matching the token's remaining lifetime.
+
+```javascript
+app.post('/logout', async (req, res) => {
+    try {
+        const token = req.headers.authorization.split(' ')[1];
+        await jwtManager.invalidateToken(token);
+        res.status(200).send({ message: 'Logged out successfully' });
+    } catch (error) {
+        console.error('Logout failed', error);
+        res.status(500).send({ error: 'Failed to logout' });
+    }
+});
+```
+
+2. **Global Invalidation:** For scenarios like password resets or account compromises, you may need to invalidate all tokens for a user. Use the `invalidateAllUserTokens(userId)` function. This function sets an invalidation timestamp in Redis, which is checked during token verification.
+
+```javascript
+app.post('/reset-password', async (req, res) => {
+    try {
+        const { userId } = req.body;
+        await jwtManager.invalidateAllUserTokens(userId);
+        res.status(200).send({ message: 'Password reset successful. All sessions invalidated.' });
+    } catch (error) {
+        console.error('Password reset failed', error);
+        res.status(500).send({ error: 'Failed to reset password' });
+    }
+});
+```
+
+3. **Middleware Integration:** The JWTManager middleware automatically checks if a token is blacklisted before authorizing a request. If the token is blacklisted, the middleware returns a 401 Unauthorized error.
+4. **Token Validation:** JWT-RBAC manager provides an dedicated validation endpoint where you can validate token is blacklist or not
+
+```javascript
+JWTManager.createValidationEndpoint = function(jwtManager) {
+  return async (req, res) => {
+    try {
+      const token = req.query.token;
+      const valid = !(await jwtManager.isBlacklisted(token));
+      res.json({ valid, timestamp: Date.now() });
+    } catch (error) {
+      res.json({ valid: false });
+    }
+  };
+};
+```
+
+### Refresh Token Rate Limiting
+
+#### Overview
+To prevent abuse and potential brute-force attacks, it's essential to limit the rate at which refresh tokens can be used to generate new access tokens.
+
+#### Implementation Details
+
+1.  **Initialization:** When creating the JWTManager instance, configure the `refreshTokenLimiter` option with a Redis adapter:
+```javascript
+const { JWTManager, RedisAdapter } = require('jwt-rbac-manager');
+const redis = require('redis');
+const client = redis.createClient();
+
+const jwtManager = new JWTManager({
+    refreshTokenLimiter: new RedisAdapter(client)
+});
+```
+
+2.  **Rate Limiting Logic:**
+    -The refresh token route increments a counter in redis on every try and apply expire after certain time .
+
+```javascript
+async refreshToken(refreshToken, options = {}) {
+    try {
+      const decoded = jwt.verify(
+        refreshToken,
+        this.algorithm.startsWith("HS") ? this.secretKey : this.publicKey,
+        { algorithms: [this.algorithm] }
+      );
+
+      if (!decoded.isRefreshToken) {
+        throw new RefreshTokenError("Invalid refresh token");
+      }
+
+      if (this.tokenBlacklist) {
+        const isBlacklisted = await this.tokenBlacklist.get(
+          `refresh:${decoded.jti}`
+        );
+        if (isBlacklisted === "true") {
+          throw new RefreshTokenError("Refresh token has been revoked");
+        }
+      }
+
+      if (this.refreshTokenLimiter) {
+        const userId = decoded.sub;
+        const key = `refresh_limit:${userId}`;
+        const count = await this.refreshTokenLimiter.incr(key);
+
+        if (count === 1) {
+          await this.refreshTokenLimiter.expire(key, 3600);
+        }
+
+        if (count > 10) {
+          this.auditLogger.log("REFRESH_RATE_LIMIT_EXCEEDED", { userId });
+          throw new RefreshTokenError("Too many refresh attempts");
+        }
+      }
+}
+```
+3.  **Error Handling:** If the rate limit is exceeded, the `refreshToken` method throws a `RefreshTokenError` with the message "Too many refresh attempts." You should handle this error in your application to provide appropriate feedback to the user.
+
+```javascript
+app.post('/refresh-token', async (req, res) => {
+    try {
+        const newTokenPair = await jwtManager.refreshToken(req.body.refreshToken);
+        res.json(newTokenPair);
+    } catch (error) {
+        if (error instanceof RefreshTokenError && error.message === "Too many refresh attempts") {
+            res.status(429).json({ error: 'Too many refresh attempts. Please try again later.' });
+        } else {
+            res.status(401).json({ error: error.message });
+        }
+    }
+});
+```
+
+### Storage Configuration
+
+#### In-Memory (Default)
+
+```javascript
+const { JWTManager } = require('jwt-rbac-manager');
+const jwtManager = new JWTManager(); // Token blacklisting disabled
+```
+
+```javascript
+const { JWTManager, MemoryAdapter } = require('jwt-rbac-manager');
+
+const jwtManager = new JWTManager({
+  tokenBlacklist: new MemoryAdapter(),
+  refreshTokenLimiter: new MemoryAdapter()
+});
+```
+
+##### Usage Notes
+-   In-memory storage is suitable for development and testing but is **not recommended for production** due to its lack of persistence and scalability.
+
+#### Redis
+
+```javascript
+const { JWTManager, RedisAdapter } = require('jwt-rbac-manager');
+const redis = require('redis');
+
+const redisClient = redis.createClient({
+    url: 'redis://default:YOUR_REDIS_PASSWORD@localhost:6379'
+});
+
+redisClient.on('connect', () => console.log('Redis connected'));
+redisClient.on('error', (error) => console.error('Redis connection error:', error));
+
+(async () => {
+    await redisClient.connect();
+})();
+
+const jwtManager = new JWTManager({
+    tokenBlacklist: new RedisAdapter(redisClient),
+    refreshTokenLimiter: new RedisAdapter(redisClient)
+});
+```
+
+##### Configuration Notes
+-   Replace `YOUR_REDIS_PASSWORD` with your actual Redis password.
+-   Ensure your Redis instance is properly configured for security and performance.
+
+#### MongoDB
+```javascript
+const { JWTManager, MongoAdapter } = require('jwt-rbac-manager');
+const { MongoClient } = require('mongodb');
+
+const mongoClient = new MongoClient('mongodb://user:password@localhost:27017/mydb');
+
+const jwtManager = new JWTManager({
+    tokenBlacklist: new MongoAdapter({
+        collection: mongoClient.db('mydb').collection('tokenBlacklist')
+    }),
+    refreshTokenLimiter: new MongoAdapter({
+        collection: mongoClient.db('mydb').collection('rateLimits')
+    })
+});
+```
+##### Configuration Notes
+-   Replace `mongodb://user:password@localhost:27017/mydb` with your MongoDB connection string.
+-   Ensure proper indexing for performance.
+
+#### SQL
+```javascript
+const { JWTManager, SqlAdapter } = require('jwt-rbac-manager');
+const mysql = require('mysql2/promise');
+
+const pool = mysql.createPool({
+    host: 'localhost',
+    user: 'user',
+    password: 'password',
+    database: 'mydb'
+});
+
+const jwtManager = new JWTManager({
+    tokenBlacklist: new SqlAdapter({ db: pool, tableName: 'tokenBlacklist' }),
+    refreshTokenLimiter: new SqlAdapter({ db: pool, tableName: 'rateLimits' })
+});
+```
+##### Configuration Notes
+-   Replace connection details with your SQL database credentials.
+-   Ensure the SQL table is properly created as shown in the code.
+
+### Security Best Practices
+
+1.  **Use a Strong Redis Password:** Always set a strong password for your Redis instance to prevent unauthorized access.
+2.  **Monitor Rate Limiting:** Implement monitoring to detect and respond to potential abuse or attacks.
+3.  **Secure Your Storage:** Ensure your Redis, MongoDB, or SQL instances are properly secured to prevent data breaches.
+4.  **Centralized Blacklist:** In a distributed system, ensure your blacklist is centralized (e.g., using Redis) so all instances can access it.
+
+By following these guidelines, you can effectively implement token blacklisting and refresh token rate limiting to enhance the security of your JWT-based authentication system.
 
 ## Contributing
 
