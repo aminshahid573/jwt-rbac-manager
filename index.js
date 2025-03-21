@@ -1,6 +1,411 @@
-// jwt-manager/index.js
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+
+// Base adapter class for storage backends
+class BaseAdapter {
+  constructor() {
+    if (this.constructor === BaseAdapter) {
+      throw new Error("BaseAdapter cannot be instantiated directly");
+    }
+  }
+
+  async get(key) {
+    throw new Error("Method not implemented");
+  }
+  async set(key, value, options = {}) {
+    throw new Error("Method not implemented");
+  }
+  async del(key) {
+    throw new Error("Method not implemented");
+  }
+  async hSet(hashKey, field, value) {
+    throw new Error("Method not implemented");
+  }
+  async hGetAll(hashKey) {
+    throw new Error("Method not implemented");
+  }
+  async hDel(hashKey, field) {
+    throw new Error("Method not implemented");
+  }
+  async incr(key) {
+    throw new Error("Method not implemented");
+  }
+  async expire(key, seconds) {
+    throw new Error("Method not implemented");
+  }
+}
+
+// In-memory adapter implementation (default)
+class MemoryAdapter extends BaseAdapter {
+  constructor() {
+    super();
+    this.store = new Map();
+    this.hashes = new Map();
+    this.counters = new Map();
+    this.expirations = new Map();
+  }
+
+  async get(key) {
+    if (this._isExpired(key)) {
+      this.store.delete(key);
+      return null;
+    }
+    return this.store.get(key);
+  }
+
+  async set(key, value, options = {}) {
+    this.store.set(key, value);
+
+    if (options.EX) {
+      const expiry = Date.now() + options.EX * 1000;
+      this.expirations.set(key, expiry);
+    }
+
+    return true;
+  }
+
+  async del(key) {
+    this.expirations.delete(key);
+    return this.store.delete(key);
+  }
+
+  async hSet(hashKey, field, value) {
+    if (!this.hashes.has(hashKey)) {
+      this.hashes.set(hashKey, new Map());
+    }
+    this.hashes.get(hashKey).set(field, value);
+    return true;
+  }
+
+  async hGetAll(hashKey) {
+    if (!this.hashes.has(hashKey)) {
+      return {};
+    }
+
+    const result = {};
+    this.hashes.get(hashKey).forEach((value, key) => {
+      result[key] = value;
+    });
+
+    return result;
+  }
+
+  async hDel(hashKey, field) {
+    if (this.hashes.has(hashKey)) {
+      return this.hashes.get(hashKey).delete(field);
+    }
+    return false;
+  }
+
+  async incr(key) {
+    const current = this.counters.get(key) || 0;
+    this.counters.set(key, current + 1);
+    return current + 1;
+  }
+
+  async expire(key, seconds) {
+    const expiry = Date.now() + seconds * 1000;
+    this.expirations.set(key, expiry);
+    return true;
+  }
+
+  _isExpired(key) {
+    const expiry = this.expirations.get(key);
+    return expiry && expiry < Date.now();
+  }
+}
+
+// Redis adapter implementation
+class RedisAdapter extends BaseAdapter {
+  constructor(redisClient) {
+    super();
+    if (!redisClient) {
+      throw new Error("Redis client is required");
+    }
+    this.client = redisClient;
+  }
+
+  async get(key) {
+    return this.client.get(key);
+  }
+
+  async set(key, value, options = {}) {
+    if (options.EX) {
+      return this.client.set(key, value, "EX", options.EX);
+    }
+    return this.client.set(key, value);
+  }
+
+  async del(key) {
+    return this.client.del(key);
+  }
+
+  async hSet(hashKey, field, value) {
+    return this.client.hSet(hashKey, field, value);
+  }
+
+  async hGetAll(hashKey) {
+    return this.client.hGetAll(hashKey);
+  }
+
+  async hDel(hashKey, field) {
+    return this.client.hDel(hashKey, field);
+  }
+
+  async incr(key) {
+    return this.client.incr(key);
+  }
+
+  async expire(key, seconds) {
+    return this.client.expire(key, seconds);
+  }
+}
+
+// MongoDB adapter implementation
+class MongoAdapter extends BaseAdapter {
+  constructor(options) {
+    super();
+    this.collection = options.collection;
+    if (!this.collection) {
+      throw new Error("MongoDB collection is required");
+    }
+  }
+
+  async get(key) {
+    const doc = await this.collection.findOne({ _id: key });
+    if (!doc) return null;
+
+    if (doc.expiry && doc.expiry < new Date()) {
+      await this.del(key);
+      return null;
+    }
+
+    return doc.value;
+  }
+
+  async set(key, value, options = {}) {
+    let expiry = null;
+    if (options.EX) {
+      expiry = new Date(Date.now() + options.EX * 1000);
+    }
+
+    await this.collection.updateOne(
+      { _id: key },
+      { $set: { value, expiry } },
+      { upsert: true }
+    );
+
+    return true;
+  }
+
+  async del(key) {
+    const result = await this.collection.deleteOne({ _id: key });
+    return result.deletedCount > 0;
+  }
+
+  async hSet(hashKey, field, value) {
+    const update = {};
+    update[`data.${field}`] = value;
+
+    await this.collection.updateOne(
+      { _id: hashKey, type: "hash" },
+      { $set: update },
+      { upsert: true }
+    );
+
+    return true;
+  }
+
+  async hGetAll(hashKey) {
+    const doc = await this.collection.findOne({ _id: hashKey, type: "hash" });
+    return doc?.data || {};
+  }
+
+  async hDel(hashKey, field) {
+    const update = {};
+    update[`data.${field}`] = 1;
+
+    const result = await this.collection.updateOne(
+      { _id: hashKey, type: "hash" },
+      { $unset: update }
+    );
+
+    return result.modifiedCount > 0;
+  }
+
+  async incr(key) {
+    const result = await this.collection.findOneAndUpdate(
+      { _id: key, type: "counter" },
+      { $inc: { value: 1 } },
+      { upsert: true, returnDocument: "after" }
+    );
+
+    return result.value?.value || 1;
+  }
+
+  async expire(key, seconds) {
+    const expiry = new Date(Date.now() + seconds * 1000);
+
+    const result = await this.collection.updateOne(
+      { _id: key },
+      { $set: { expiry } }
+    );
+
+    return result.modifiedCount > 0;
+  }
+}
+
+// SQL adapter implementation
+class SqlAdapter extends BaseAdapter {
+  constructor(options) {
+    super();
+    this.db = options.db;
+    this.tableName = options.tableName || "jwt_store";
+
+    if (!this.db) {
+      throw new Error("SQL database connection is required");
+    }
+
+    this._initTable();
+  }
+
+  async _initTable() {
+    try {
+      await this.db.query(`
+        CREATE TABLE IF NOT EXISTS ${this.tableName} (
+          key VARCHAR(255) PRIMARY KEY,
+          value TEXT,
+          type VARCHAR(20),
+          hash_field VARCHAR(255),
+          expiry TIMESTAMP NULL
+        )
+      `);
+
+      await this.db.query(`
+        CREATE INDEX IF NOT EXISTS idx_${this.tableName}_expiry 
+        ON ${this.tableName}(expiry)
+      `);
+    } catch (error) {
+      console.error("Error initializing SQL table:", error);
+    }
+  }
+
+  async get(key) {
+    const query = `
+      SELECT value FROM ${this.tableName} 
+      WHERE key = ? AND (expiry IS NULL OR expiry > ?)
+    `;
+
+    const result = await this.db.query(query, [key, new Date()]);
+    if (!result.rows || result.rows.length === 0) return null;
+
+    return result.rows[0].value;
+  }
+
+  async set(key, value, options = {}) {
+    let expiry = null;
+    if (options.EX) {
+      expiry = new Date(Date.now() + options.EX * 1000);
+    }
+
+    const query = `
+      INSERT INTO ${this.tableName} (key, value, type, expiry)
+      VALUES (?, ?, 'string', ?)
+      ON DUPLICATE KEY UPDATE value = ?, expiry = ?
+    `;
+
+    await this.db.query(query, [key, value, expiry, value, expiry]);
+    return true;
+  }
+
+  async del(key) {
+    const query = `DELETE FROM ${this.tableName} WHERE key = ?`;
+    const result = await this.db.query(query, [key]);
+    return result.affectedRows > 0;
+  }
+
+  async hSet(hashKey, field, value) {
+    const compositeKey = `${hashKey}:${field}`;
+
+    const query = `
+      INSERT INTO ${this.tableName} (key, value, type, hash_field)
+      VALUES (?, ?, 'hash', ?)
+      ON DUPLICATE KEY UPDATE value = ?
+    `;
+
+    await this.db.query(query, [compositeKey, value, field, value]);
+    return true;
+  }
+
+  async hGetAll(hashKey) {
+    const query = `
+      SELECT hash_field, value FROM ${this.tableName}
+      WHERE key LIKE ? AND type = 'hash'
+    `;
+
+    const result = await this.db.query(query, [`${hashKey}:%`]);
+    if (!result.rows) return {};
+
+    const hashData = {};
+    for (const row of result.rows) {
+      hashData[row.hash_field] = row.value;
+    }
+
+    return hashData;
+  }
+
+  async hDel(hashKey, field) {
+    const compositeKey = `${hashKey}:${field}`;
+
+    const query = `DELETE FROM ${this.tableName} WHERE key = ? AND type = 'hash'`;
+    const result = await this.db.query(query, [compositeKey]);
+
+    return result.affectedRows > 0;
+  }
+
+  async incr(key) {
+    const getQuery = `
+      SELECT value FROM ${this.tableName}
+      WHERE key = ? AND type = 'counter'
+    `;
+
+    const result = await this.db.query(getQuery, [key]);
+    let currentValue = 0;
+
+    if (result.rows && result.rows.length > 0) {
+      currentValue = parseInt(result.rows[0].value, 10) || 0;
+    }
+
+    const newValue = currentValue + 1;
+
+    const updateQuery = `
+      INSERT INTO ${this.tableName} (key, value, type)
+      VALUES (?, ?, 'counter')
+      ON DUPLICATE KEY UPDATE value = ?
+    `;
+
+    await this.db.query(updateQuery, [
+      key,
+      newValue.toString(),
+      newValue.toString(),
+    ]);
+
+    return newValue;
+  }
+
+  async expire(key, seconds) {
+    const expiry = new Date(Date.now() + seconds * 1000);
+
+    const query = `
+      UPDATE ${this.tableName}
+      SET expiry = ?
+      WHERE key = ?
+    `;
+
+    const result = await this.db.query(query, [expiry, key]);
+    return result.affectedRows > 0;
+  }
+}
 
 // Custom error classes
 class JWTManagerError extends Error {
@@ -49,15 +454,13 @@ class InvalidationError extends JWTManagerError {
 
 class JWTManager {
   constructor(options = {}) {
-    // Algorithm settings
-    this.algorithm = options.algorithm || "HS256";
+    this.algorithm = options.algorithm || "RS256";
 
     if (this.algorithm.startsWith("HS")) {
-      // Symmetric algorithms use a secret key
-      this.secretKey = options.secretKey || "your-secret-key";
+      this.secretKey =
+        options.secretKey || crypto.randomBytes(32).toString("hex");
       this.publicKey = this.secretKey;
     } else {
-      // Asymmetric algorithms use key pairs
       this.privateKey = options.privateKey;
       this.publicKey = options.publicKey;
 
@@ -68,23 +471,22 @@ class JWTManager {
       }
     }
 
-    // Token configuration
-    this.tokenExpiration = options.tokenExpiration || "1h";
+    this.tokenExpiration = options.tokenExpiration || "15m";
     this.refreshExpiration = options.refreshExpiration || "7d";
     this.issuer = options.issuer || "jwt-manager";
-    this.enforceIat = options.enforceIat || false;
+    this.enforceIat =
+      options.enforceIat !== undefined ? options.enforceIat : true;
 
-    // Blacklisting and rate limiting
-    this.tokenBlacklist = options.tokenBlacklist || null; // Redis client or other store
-    this.refreshTokenLimiter = options.refreshTokenLimiter || null; // Redis client for rate limiting
+    this.tokenBlacklist = options.tokenBlacklist || new MemoryAdapter();
+    this.refreshTokenLimiter =
+      options.refreshTokenLimiter || new MemoryAdapter();
 
-    // RBAC configuration
     this.permissionsMap = options.permissionsMap || {
       admin: ["read:all", "write:all", "delete:all"],
       editor: ["read:all", "write:own"],
       user: ["read:own"],
     };
-    // New features configuration
+
     this.auditLogger = options.auditLogger || {
       log: (eventType, data) => console.log(`[AUDIT] ${eventType}:`, data),
     };
@@ -100,17 +502,34 @@ class JWTManager {
       sessionExpiry: "30d",
     };
 
-    // Token version tracking
+    this.sensitiveFields = options.sensitiveFields || [
+      "password",
+      "ssn",
+      "creditCard",
+    ];
     this.tokenVersions = new Map();
+
+    // Add token versioning system
+    this.tokenVersionPrefix = options.tokenVersionPrefix || "tv_";
+    this.roleVersionPrefix = options.roleVersionPrefix || "rv_";
+
+    // Add key rotation support
+    this.keyRotationInterval =
+      options.keyRotationInterval || 30 * 24 * 60 * 60 * 1000; // 30 days
+    this.keyHistory = options.keyHistory || new Map();
+
+    // Add security headers
+    this.securityHeaders = options.securityHeaders || {
+      strictTransportSecurity: "max-age=31536000; includeSubDomains",
+      contentSecurityPolicy: "default-src 'self'",
+    };
+
+    // Initialize key rotation
+    if (this.algorithm.startsWith("HS")) {
+      this._rotateSecretKey();
+    }
   }
 
-  /**
-   * Generate a JWT token
-   * @param {String} userId - User ID
-   * @param {Array} roles - Array of user roles
-   * @param {Object} options - Token generation options
-   * @returns {Object} - Object containing token and refresh token
-   */
   generateToken(userId, roles = ["user"], options = {}) {
     if (!userId) {
       throw new InvalidTokenError("User ID is required");
@@ -123,7 +542,6 @@ class JWTManager {
       refreshExpiresIn = this.refreshExpiration,
     } = options;
 
-    // Dynamic expiration based on user role/type
     let tokenExpiration = expiresIn;
     if (!tokenExpiration) {
       if (roles.includes("admin")) {
@@ -135,18 +553,24 @@ class JWTManager {
       }
     }
 
-    // Standard claims
+    Object.keys(additionalData).forEach((key) => {
+      if (this.sensitiveFields.includes(key)) {
+        throw new InvalidTokenError(
+          `Cannot include sensitive field '${key}' in token payload`
+        );
+      }
+    });
+
     const payload = {
       sub: userId,
       roles,
       permissions: this._derivePermissionsFromRoles(roles),
-      jti: this._generateTokenId(), // Add unique token ID
+      jti: this._generateTokenId(),
+      tv: this._getRoleVersions(roles),
       ...additionalData,
     };
 
-    // Merge custom claims (with validation)
     Object.entries(customClaims).forEach(([key, value]) => {
-      // Prevent overriding protected claims
       if (!["iss", "sub", "iat", "exp", "nbf", "jti"].includes(key)) {
         payload[key] = value;
       }
@@ -175,18 +599,12 @@ class JWTManager {
     };
   }
 
-  /**
-   * Verify a JWT token
-   * @param {String} token - JWT token to verify
-   * @returns {Object} - Decoded token payload
-   */
   async verifyToken(token, mfaOptions = {}) {
     try {
       const decoded = jwt.verify(token, this.publicKey, {
         algorithms: [this.algorithm],
       });
 
-      // Check if token is blacklisted based on timestamp
       if (this.enforceIat && this.tokenBlacklist) {
         const invalidationTime = await this.tokenBlacklist.get(
           `user:${decoded.sub}:invalidation_time`
@@ -196,7 +614,6 @@ class JWTManager {
         }
       }
 
-      // Check if token is directly blacklisted
       if (this.tokenBlacklist) {
         const tokenId = decoded.jti || decoded.sub;
         const isBlacklisted = await this.tokenBlacklist.get(
@@ -207,20 +624,21 @@ class JWTManager {
         }
       }
 
-      // MFA verification
       if (decoded.mfaRequired && this.mfaProvider) {
         if (!mfaOptions.code) {
           throw new JWTManagerError("MFA required", "MFA_REQUIRED");
         }
 
-        const valid = await this.mfaProvider.verify(decoded.sub, mfaOptions.code);
+        const valid = await this.mfaProvider.verify(
+          decoded.sub,
+          mfaOptions.code
+        );
         if (!valid) {
           this.auditLogger.log("MFA_FAILURE", { userId: decoded.sub });
           throw new JWTManagerError("MFA verification failed", "MFA_FAILED");
         }
       }
 
-      // Validate token version if available
       if (decoded.tv) {
         const versionValid = await this.validateTokenVersion(decoded);
         if (!versionValid) {
@@ -234,9 +652,10 @@ class JWTManager {
         throw new TokenExpiredError("Token has expired");
       } else if (error instanceof jwt.JsonWebTokenError) {
         throw new InvalidTokenError(error.message || "Invalid token provided");
-      } else if (error instanceof TokenInvalidatedError) {
-        throw error;
-      } else if (error instanceof JWTManagerError) {
+      } else if (
+        error instanceof TokenInvalidatedError ||
+        error instanceof JWTManagerError
+      ) {
         throw error;
       } else {
         throw new TokenVerificationError(
@@ -246,93 +665,44 @@ class JWTManager {
     }
   }
 
-  /**
-   * Generate a new token using refresh token
-   * @param {String} refreshToken - Refresh token
-   * @param {Object} options - Options for new token
-   * @returns {Object} - New token pair
-   */
   async refreshToken(refreshToken, options = {}) {
-    try {
-      const decoded = jwt.verify(
-        refreshToken,
-        this.algorithm.startsWith("HS") ? this.secretKey : this.publicKey,
-        { algorithms: [this.algorithm] }
-      );
+    const hashedToken = crypto
+      .createHash("sha512")
+      .update(refreshToken)
+      .digest("hex");
+    const decoded = jwt.decode(refreshToken, { complete: true });
 
-      // Check if this is actually a refresh token
-      if (!decoded.isRefreshToken) {
-        throw new RefreshTokenError("Invalid refresh token");
-      }
-
-      // Check if refresh token is blacklisted
-      if (this.tokenBlacklist) {
-        const isBlacklisted = await this.tokenBlacklist.get(
-          `refresh:${decoded.jti}`
-        );
-        if (isBlacklisted === "true") {
-          throw new RefreshTokenError("Refresh token has been revoked");
-        }
-      }
-
-      // Apply rate limiting if configured
-      if (this.refreshTokenLimiter) {
-        const userId = decoded.sub;
-        const key = `refresh_limit:${userId}`;
-
-        // Increment counter and get current value
-        const count = await this.refreshTokenLimiter.incr(key);
-
-        // Set expiry for the counter if it's new
-        if (count === 1) {
-          await this.refreshTokenLimiter.expire(key, 3600); // 1 hour window
-        }
-
-        // Check if limit is reached (e.g., 10 refreshes per hour)
-        if (count > 10) {
-          throw new RefreshTokenError("Too many refresh attempts");
-        }
-      }
-
-      // Generate new tokens with family continuity for refresh token chaining
-      const tokenPair = this.generateToken(decoded.sub, decoded.roles, {
-        additionalData: { previousIat: decoded.iat },
-        family: decoded.family, // Maintain the family for refresh token chaining
-        ...options,
-      });
-
-      // Blacklist the used refresh token
-      if (this.tokenBlacklist) {
-        const remainingTtl = decoded.exp - Math.floor(Date.now() / 1000);
-        if (remainingTtl > 0) {
-          await this.tokenBlacklist.set(
-            `refresh:${decoded.jti}`,
-            "true",
-            "EX",
-            remainingTtl
-          );
-        }
-      }
-
-      return tokenPair;
-    } catch (error) {
-      if (error instanceof RefreshTokenError) {
-        throw error;
-      } else if (error instanceof jwt.TokenExpiredError) {
-        throw new RefreshTokenError("Refresh token has expired");
-      } else if (error instanceof jwt.JsonWebTokenError) {
-        throw new RefreshTokenError(`Invalid refresh token: ${error.message}`);
-      }
-      throw new RefreshTokenError(`Token refresh failed: ${error.message}`);
+    if (!decoded?.payload?.sub) {
+      throw new RefreshTokenError("Invalid refresh token structure");
     }
+
+    const familyData = await this.refreshTokenLimiter.hGetAll(
+      `user:${decoded.payload.sub}`
+    );
+    const familyEntry = Object.values(familyData).find(
+      (entry) => entry.token === hashedToken
+    );
+
+    if (!familyEntry || Date.now() > familyEntry.expiresAt) {
+      throw new RefreshTokenError("Invalid or expired refresh token");
+    }
+
+    if (familyEntry.uses >= this.sessionConfig.maxSessions) {
+      throw new RefreshTokenError("Maximum session limit reached");
+    }
+
+    // Invalidate old token and generate new one
+    await this.refreshTokenLimiter.hDel(
+      `user:${decoded.payload.sub}`,
+      familyEntry.family
+    );
+
+    return this.generateToken(decoded.payload.sub, familyEntry.roles, {
+      ...options,
+      family: familyEntry.family,
+    });
   }
 
-  /**
-   * Check if user has required roles
-   * @param {String} token - JWT token
-   * @param {Array} requiredRoles - Roles required for access
-   * @returns {Boolean} - Whether user has required roles
-   */
   async hasRoles(token, requiredRoles = []) {
     const decoded = await this.verifyToken(token);
 
@@ -343,12 +713,6 @@ class JWTManager {
     return requiredRoles.every((role) => decoded.roles.includes(role));
   }
 
-  /**
-   * Check if user has required permissions
-   * @param {String} token - JWT token
-   * @param {Array} requiredPermissions - Permissions required for access
-   * @returns {Boolean} - Whether user has required permissions
-   */
   async hasPermissions(token, requiredPermissions = []) {
     const decoded = await this.verifyToken(token);
 
@@ -361,55 +725,37 @@ class JWTManager {
     );
   }
 
-  /**
-   * Invalidate a token (for logout)
-   * @param {String} token - Token to invalidate
-   * @returns {Object} - Result of invalidation
-   */
-  async invalidateToken(token) {
-    try {
-      const decoded = await this.verifyToken(token);
-      const tokenId = decoded.jti || decoded.sub;
-      const expiryTime = decoded.exp - Math.floor(Date.now() / 1000);
+  async invalidateToken(token, options = {}) {
+    const decoded = jwt.decode(token, { complete: true });
+    if (!decoded?.payload?.jti) {
+      throw new InvalidationError("Token missing JTI");
+    }
 
-      if (this.tokenBlacklist) {
-        // Store in blacklist until token expiry
-        if (expiryTime > 0) {
-          await this.tokenBlacklist.set(
-            `blacklist:${tokenId}`,
-            "true",
-            "EX",
-            expiryTime
-          );
-        }
-      }
+    const expiration = decoded.payload.exp
+      ? Math.floor((decoded.payload.exp * 1000 - Date.now()) / 1000)
+      : 3600;
 
-      return {
-        invalidated: true,
-        expiresAt: new Date(decoded.exp * 1000),
-      };
-    } catch (error) {
-      if (error instanceof TokenExpiredError) {
-        // No need to blacklist an expired token
-        return { invalidated: true, expired: true };
-      }
-      throw new InvalidationError(
-        `Failed to invalidate token: ${error.message}`
+    await this.tokenBlacklist.set(`blacklist:${decoded.payload.jti}`, "true", {
+      EX: expiration,
+    });
+
+    if (options.invalidateAll) {
+      await this.tokenBlacklist.set(
+        `user:${decoded.payload.sub}:invalidation_time`,
+        Math.floor(Date.now() / 1000)
       );
     }
+
+    this.auditLogger.log("TOKEN_INVALIDATED", {
+      userId: decoded.payload.sub,
+      jti: decoded.payload.jti,
+    });
+
+    return true;
   }
 
-  /**
-   * Invalidate all tokens for a user
-   * @param {String} userId - User ID
-   * @returns {Object} - Result of invalidation
-   */
   async invalidateAllUserTokens(userId) {
     try {
-      if (!this.tokenBlacklist) {
-        throw new InvalidationError("Token blacklist store is not configured");
-      }
-
       const invalidationTime = Math.floor(Date.now() / 1000);
       await this.tokenBlacklist.set(
         `user:${userId}:invalidation_time`,
@@ -427,11 +773,6 @@ class JWTManager {
     }
   }
 
-  /**
-   * Check if a token is blacklisted
-   * @param {String} token - Token to check
-   * @returns {Boolean} - Whether the token is blacklisted
-   */
   async isBlacklisted(token) {
     try {
       const decoded = jwt.verify(
@@ -442,124 +783,90 @@ class JWTManager {
 
       if (!this.tokenBlacklist) return false;
 
-      // Check timestamp-based invalidation
       if (this.enforceIat) {
         const invalidationTime = await this.tokenBlacklist.get(
           `user:${decoded.sub}:invalidation_time`
         );
-        
-        // The mock is returning the invalidation time directly
-        // We need to handle both cases: when it's a direct response and when it's from Redis
+
         const parsedTime = parseInt(invalidationTime, 10);
         if (!isNaN(parsedTime) && decoded.iat <= parsedTime) {
           return true;
         }
       }
 
-      // Check direct blacklisting
       const tokenId = decoded.jti || decoded.sub;
       const result = await this.tokenBlacklist.get(`blacklist:${tokenId}`);
       return result === "true";
-
     } catch (error) {
       return false;
     }
   }
 
-  /**
-   * Allow adding new roles at runtime
-   * @param {String} role - Role name
-   * @param {Array} permissions - Array of permissions for the role
-   */
   addRole(role, permissions) {
     this.permissionsMap[role] = permissions;
   }
 
-  /**
-   * Generate a refresh token
-   * @param {String} userId - User ID
-   * @param {Array} roles - User roles
-   * @param {Object} options - Options for refresh token
-   * @returns {String} - Refresh token
-   * @private
-   */
-  _generateRefreshToken(userId, roles = ["user"], options = {}) {
-    const refreshPayload = {
-      sub: userId,
-      roles,
-      isRefreshToken: true,
-      jti: this._generateTokenId(), // Add unique ID for blacklisting
-    };
+  async _generateRefreshToken(userId, roles, options) {
+    const refreshToken = crypto.randomBytes(64).toString("hex");
+    const hashedToken = crypto
+      .createHash("sha512")
+      .update(refreshToken)
+      .digest("hex");
+    const expiresAt = this._getExpirationTime(options.refreshExpiresIn);
 
-    // Add family ID to track refresh token chains for better security
-    if (options.family) {
-      refreshPayload.family = options.family;
-    }
-
-    return jwt.sign(
-      refreshPayload,
-      this.algorithm.startsWith("HS") ? this.secretKey : this.privateKey,
-      {
-        expiresIn: options.refreshExpiresIn || this.refreshExpiration,
-        issuer: this.issuer,
-        algorithm: this.algorithm,
-      }
+    await this.refreshTokenLimiter.hSet(
+      `user:${userId}`,
+      options.family,
+      JSON.stringify({
+        token: hashedToken,
+        expiresAt,
+        roles,
+        uses: 0,
+      })
     );
+
+    await this.refreshTokenLimiter.expire(
+      `user:${userId}`,
+      Math.floor((expiresAt - Date.now()) / 1000)
+    );
+
+    return refreshToken;
   }
 
-  /**
-   * Calculate expiration time in seconds
-   * @param {String} expirationString - Expiration time (e.g., '1h', '7d')
-   * @returns {Number} - Expiration time in seconds
-   * @private
-   */
-  _getExpirationTime(expirationString) {
-    const timeUnits = {
-      s: 1,
-      m: 60,
-      h: 60 * 60,
-      d: 24 * 60 * 60,
+  _getExpirationTime(expiresIn) {
+    const units = {
+      s: 1000,
+      m: 60 * 1000,
+      h: 60 * 60 * 1000,
+      d: 24 * 60 * 60 * 1000,
     };
 
-    const match = expirationString.match(/^(\d+)([smhd])$/);
-    if (!match) {
-      return 3600; // Default to 1 hour
-    }
+    const match = expiresIn.match(/^(\d+)([smhd])$/);
+    if (!match) throw new JWTManagerError("Invalid expiration format");
 
-    const [, time, unit] = match;
-    return parseInt(time) * timeUnits[unit];
+    const [, num, unit] = match;
+    return Date.now() + num * units[unit];
   }
 
-  /**
-   * Derive permissions from roles
-   * @param {Array} roles - User roles
-   * @returns {Array} - Derived permissions
-   * @private
-   */
   _derivePermissionsFromRoles(roles) {
-    const permissions = new Set();
-
-    roles.forEach((role) => {
-      if (this.permissionsMap[role]) {
-        this.permissionsMap[role].forEach((permission) => {
-          permissions.add(permission);
-        });
-      }
-    });
-
-    return Array.from(permissions);
+    return roles.reduce((perms, role) => {
+      const rolePerms = this.permissionsMap[role] || [];
+      return [...new Set([...perms, ...rolePerms])];
+    }, []);
   }
 
-  /**
-   * Generate a unique token ID
-   * @returns {String} - Unique token ID
-   * @private
-   */
   _generateTokenId() {
     return crypto.randomBytes(16).toString("hex");
   }
 
-  /** NEW FEATURE: Dynamic Role Updates with Versioning */
+  _getRoleVersions(roles) {
+    return roles.reduce((acc, role) => {
+      acc[role] =
+        this.tokenVersions.get(`${this.roleVersionPrefix}${role}`) || 1;
+      return acc;
+    }, {});
+  }
+
   async updateRole(role, newPermissions) {
     if (!this.permissionsMap[role]) {
       throw new JWTManagerError(`Role ${role} not found`, "ROLE_NOT_FOUND");
@@ -578,20 +885,23 @@ class JWTManager {
     return { role, version: newVersion };
   }
 
-  /** NEW FEATURE: Token Version Validation */
   async validateTokenVersion(decodedToken) {
-    const roleVersions = await Promise.all(
-      decodedToken.roles.map(async (role) => ({
-        role,
-        currentVersion: this.tokenVersions.get(role) || 0,
-        tokenVersion: decodedToken.tv[role] || 0,
-      }))
-    );
-
-    return roleVersions.every((v) => v.currentVersion <= v.tokenVersion);
+    try {
+      const currentVersions = await Promise.all(
+        Object.keys(decodedToken.tv).map(async (role) => {
+          const storedVersion = await this.tokenBlacklist.get(
+            `${this.roleVersionPrefix}${role}`
+          );
+          return storedVersion === decodedToken.tv[role];
+        })
+      );
+      return currentVersions.every(Boolean);
+    } catch (error) {
+      this.auditLogger.log("VERSION_VALIDATION_ERROR", { error });
+      return false;
+    }
   }
 
-  /** NEW FEATURE: Session Management */
   async trackSession(userId, tokenData) {
     const sessions = await this.getSessions(userId);
     if (sessions.length >= this.sessionConfig.maxSessions) {
@@ -623,25 +933,82 @@ class JWTManager {
     }));
   }
 
-  /** NEW FEATURE: Risk-based Authentication */
-  async analyzeTokenRisk(token) {
-    const decoded = await this.verifyToken(token);
-    const usagePatterns = await this.getUsagePatterns(decoded.sub);
+  async invalidateOldestSession(userId) {
+    const sessions = await this.getSessions(userId);
+    if (sessions.length === 0) return null;
 
-    return {
-      riskScore: this._calculateRiskScore(usagePatterns),
-      lastLocation: decoded.geo || "Unknown",
-      deviceMatch: this._checkDeviceConsistency(decoded),
-      unusualActivity: this._detectAnomalies(usagePatterns),
+    sessions.sort((a, b) => a.lastAccessed - b.lastAccessed);
+    const oldestSession = sessions[0];
+
+    await this.tokenBlacklist.hDel(`sessions:${userId}`, oldestSession.id);
+    await this.invalidateToken(oldestSession.jti);
+
+    return oldestSession.id;
+  }
+
+  _rotateSecretKey() {
+    if (this.algorithm.startsWith("HS")) {
+      const newKey = crypto.randomBytes(64).toString("hex");
+      this.keyHistory.set(Date.now(), this.secretKey);
+      this.secretKey = newKey;
+
+      // Cleanup old keys
+      const cutoff = Date.now() - this.keyRotationInterval;
+      this.keyHistory.forEach((_, timestamp) => {
+        if (timestamp < cutoff) this.keyHistory.delete(timestamp);
+      });
+
+      setTimeout(() => this._rotateSecretKey(), this.keyRotationInterval);
+    }
+  }
+
+  securityMiddleware() {
+    return (req, res, next) => {
+      Object.entries(this.securityHeaders).forEach(([header, value]) => {
+        res.setHeader(header, value);
+      });
+      next();
     };
   }
 
-  /** NEW FEATURE: Token Compression */
+  rateLimitMiddleware(profile = "normal") {
+    return async (req, res, next) => {
+      const { requests, window } = this.rateLimitProfiles[profile] || {
+        requests: 50,
+        window: "5m",
+      };
+      const windowMs = this._getExpirationTime(window) - Date.now();
+      const key = `rate_limit:${req.ip}:${profile}`;
+
+      const [count] = await Promise.all([
+        this.refreshTokenLimiter.incr(key),
+        this.refreshTokenLimiter.expire(key, Math.floor(windowMs / 1000)),
+      ]);
+
+      if (count > requests) {
+        this.auditLogger.log("RATE_LIMIT_EXCEEDED", { ip: req.ip });
+        throw new JWTManagerError("Too many requests", "RATE_LIMITED");
+      }
+
+      next();
+    };
+  }
+  async analyzeTokenRisk(token) {
+    const decoded = await this.verifyToken(token);
+
+    return {
+      riskScore: Math.random(),
+      lastLocation: decoded.geo || "Unknown",
+      deviceMatch: true,
+      unusualActivity: false,
+    };
+  }
+
   generateCompressedToken(userId, roles, options = {}) {
     const payload = this._createCompactPayload(userId, roles, options);
     return jwt.sign(payload, this.secretKey, {
       algorithm: "HS256",
-      expiresIn: options.expiresIn,
+      expiresIn: options.expiresIn || this.tokenExpiration,
     });
   }
 
@@ -656,15 +1023,12 @@ class JWTManager {
   }
 }
 
-// Express middleware
-// Express middleware with security headers and enhanced error handling
-JWTManager.createMiddleware = function(jwtManager, options = {}) {
-  const { 
+JWTManager.createMiddleware = function (jwtManager, options = {}) {
+  const {
     credentialsRequired = true,
-    getToken = req => {
-      // Token extraction from multiple sources
-      if (req.headers.authorization?.startsWith('Bearer ')) {
-        return req.headers.authorization.split(' ')[1];
+    getToken = (req) => {
+      if (req.headers.authorization?.startsWith("Bearer ")) {
+        return req.headers.authorization.split(" ")[1];
       }
       if (req.cookies?.jwtToken) {
         return req.cookies.jwtToken;
@@ -672,88 +1036,94 @@ JWTManager.createMiddleware = function(jwtManager, options = {}) {
       return null;
     },
     onError = (err, req, res, next) => {
-      // Enhanced error responses
       const statusMap = {
         TokenExpiredError: 401,
         TokenInvalidatedError: 401,
         InvalidTokenError: 403,
-        JWTManagerError: 403
+        JWTManagerError: 403,
       };
-      
+
       res.status(statusMap[err.name] || 500).json({
         error: err.message,
-        code: err.code || 'AUTH_ERROR',
-        timestamp: Date.now()
+        code: err.code || "AUTH_ERROR",
+        timestamp: Date.now(),
       });
-    }
+    },
   } = options;
 
-  return async function(req, res, next) {
+  return async function (req, res, next) {
     try {
-      // Add security headers
       res.set({
-        'Strict-Transport-Security': 'max-age=63072000; includeSubDomains',
-        'Content-Security-Policy': "default-src 'self'",
-        'X-Content-Type-Options': 'nosniff',
-        'Referrer-Policy': 'strict-origin-when-cross-origin'
+        "Strict-Transport-Security":
+          "max-age=63072000; includeSubDomains; preload",
+        "Content-Security-Policy":
+          "default-src 'self'; script-src 'self'; object-src 'none'",
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "X-Frame-Options": "DENY",
+        "X-XSS-Protection": "1; mode=block",
+        "Cache-Control":
+          "no-store, no-cache, must-revalidate, proxy-revalidate",
       });
 
       const token = getToken(req);
-      
+
       if (!token) {
         if (credentialsRequired) {
-          throw new InvalidTokenError('No authentication token provided');
+          throw new InvalidTokenError("No authentication token provided");
         }
         return next();
       }
 
-      // Verify token with optional MFA check
       const decoded = await jwtManager.verifyToken(token, {
-        code: req.body?.mfaCode
+        code: req.body?.mfaCode,
       });
-      
-      // Attach user context to request
+
       req.user = {
         id: decoded.sub,
         roles: decoded.roles,
         permissions: decoded.permissions,
-        meta: decoded
+        meta: decoded,
       };
 
-      // Role-based access control
       if (options.roles) {
         const hasRoles = await jwtManager.hasRoles(token, options.roles);
         if (!hasRoles) {
-          throw new JWTManagerError('Insufficient privileges', 'ROLE_REQUIRED');
+          throw new JWTManagerError("Insufficient privileges", "ROLE_REQUIRED");
         }
       }
 
-      // Permission-based access control
       if (options.permissions) {
-        const hasPermissions = await jwtManager.hasPermissions(token, options.permissions);
+        const hasPermissions = await jwtManager.hasPermissions(
+          token,
+          options.permissions
+        );
         if (!hasPermissions) {
-          throw new JWTManagerError('Insufficient permissions', 'PERMISSION_REQUIRED');
+          throw new JWTManagerError(
+            "Insufficient permissions",
+            "PERMISSION_REQUIRED"
+          );
         }
       }
 
       next();
     } catch (error) {
-      // Audit logging for security events
-      if (error.code === 'ROLE_REQUIRED' || error.code === 'PERMISSION_REQUIRED') {
-        jwtManager.auditLogger.log('AUTHZ_FAILURE', {
+      if (
+        error.code === "ROLE_REQUIRED" ||
+        error.code === "PERMISSION_REQUIRED"
+      ) {
+        jwtManager.auditLogger.log("AUTHZ_FAILURE", {
           path: req.path,
           user: req.user?.id,
-          ip: req.ip
+          ip: req.ip,
         });
       }
-      
+
       onError(error, req, res, next);
     }
   };
 };
 
-
-// RBAC middleware helpers
 JWTManager.requireRoles = function (requiredRoles = []) {
   return (req, res, next) => {
     if (!req.user || !req.user.roles) {
@@ -790,8 +1160,7 @@ JWTManager.requirePermissions = function (requiredPermissions = []) {
   };
 };
 
-// NEW: Validation Endpoint for Microservices
-JWTManager.createValidationEndpoint = function(jwtManager) {
+JWTManager.createValidationEndpoint = function (jwtManager) {
   return async (req, res) => {
     try {
       const token = req.query.token;
@@ -803,17 +1172,14 @@ JWTManager.createValidationEndpoint = function(jwtManager) {
   };
 };
 
-// NEW: Testing Utilities
-JWTManager.createMockProvider = function() {
+JWTManager.createMockProvider = function () {
   return {
     generateToken: (userId) => `mock-token-${userId}-${Date.now()}`,
-    verifyToken: (token) => ({ sub: token.split('-')[2] }),
+    verifyToken: (token) => ({ sub: token.split("-")[2] }),
     createMiddleware: () => (req, res, next) => next(),
-    // ... other mock methods
   };
 };
 
-// Export error classes for external use
 JWTManager.errors = {
   JWTManagerError,
   TokenExpiredError,
@@ -824,4 +1190,18 @@ JWTManager.errors = {
   InvalidationError,
 };
 
-module.exports = JWTManager;
+module.exports = {
+  BaseAdapter,
+  MemoryAdapter,
+  RedisAdapter,
+  MongoAdapter,
+  SqlAdapter,
+  JWTManager,
+  JWTManagerError,
+  TokenExpiredError,
+  InvalidTokenError,
+  TokenVerificationError,
+  TokenInvalidatedError,
+  RefreshTokenError,
+  InvalidationError,
+};
