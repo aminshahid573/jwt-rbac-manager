@@ -594,10 +594,6 @@ By following these guidelines, you can effectively implement token blacklisting 
 
 The package includes comprehensive integration tests that demonstrate advanced functionality:
 
-```javascript
-const { runAdvancedTests } = require('./advanced-integration-tests');
-await runAdvancedTests();
-```
 
 #### Test Suites Overview
 
