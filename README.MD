@@ -588,6 +588,202 @@ const jwtManager = new JWTManager({
 
 By following these guidelines, you can effectively implement token blacklisting and refresh token rate limiting to enhance the security of your JWT-based authentication system.
 
+## Advanced Features
+
+### Integration Testing
+
+The package includes comprehensive integration tests that demonstrate advanced functionality:
+
+```javascript
+const { runAdvancedTests } = require('./advanced-integration-tests');
+await runAdvancedTests();
+```
+
+#### Test Suites Overview
+
+1. **Advanced Token Configuration**
+```javascript
+const advancedManager = new JWTManager({
+    algorithm: "HS256",
+    secretKey: "advanced-test-secret",
+    tokenExpiration: "5m",
+    refreshExpiration: "1h",
+    enforceIat: true,
+    tokenBlacklist: new CustomMongoAdapter({ collection }),
+    refreshTokenLimiter: await createAdapter(redis),
+    permissionsMap: {
+        admin: ["*:*"],
+        manager: ["read:*", "write:department"],
+        user: ["read:own"]
+    },
+    sessionConfig: {
+        maxSessions: 2,
+        sessionExpiry: "30m"
+    },
+    rateLimitProfiles: {
+        strict: { requests: 3, window: "1m" },
+        normal: { requests: 10, window: "5m" }
+    }
+});
+```
+
+2. **Rate Limiting Profiles**
+```javascript
+// Configure rate limiting profiles
+app.use('/api/sensitive', jwtManager.rateLimitMiddleware('strict')); // 3 requests per minute
+app.use('/api/normal', jwtManager.rateLimitMiddleware('normal')); // 10 requests per 5 minutes
+```
+
+3. **MongoDB Integration with Custom Adapter**
+```javascript
+class CustomMongoAdapter extends MongoAdapter {
+    async set(key, value, options = {}) {
+        const doc = {
+            _id: key,
+            value,
+            expiry: options.EX ? new Date(Date.now() + options.EX * 1000) : null,
+            updatedAt: new Date()
+        };
+
+        await this.collection.updateOne(
+            { _id: key },
+            { $set: doc },
+            { upsert: true }
+        );
+        return true;
+    }
+}
+
+const jwtManager = new JWTManager({
+    tokenBlacklist: new CustomMongoAdapter({ collection })
+});
+```
+
+4. **Enhanced Session Management**
+```javascript
+// Track user sessions with device information
+const sessionId = await jwtManager.trackSession(userId, {
+    jti: token.jti,
+    device: "mobile",
+    lastAccessed: Date.now()
+});
+
+// Get active sessions
+const sessions = await jwtManager.getSessions(userId);
+
+// Automatically invalidate oldest session when limit reached
+await jwtManager.invalidateOldestSession(userId);
+```
+
+5. **Role Version Control**
+```javascript
+// Generate initial token
+const token = await jwtManager.generateToken("user101", ["manager"]);
+
+// Update role permissions
+await jwtManager.updateRole("manager", [
+    "read:*", 
+    "write:department", 
+    "approve:leave"
+]);
+
+// Old tokens will be invalidated automatically
+```
+
+### Advanced Configuration Options
+
+| Option | Type | Description | Default |
+|--------|------|-------------|---------|
+| `sessionConfig` | Object | Configure session management | `{ maxSessions: 5, sessionExpiry: "30d" }` |
+| `rateLimitProfiles` | Object | Define rate limiting profiles | `{ strict: { requests: 3, window: "1m" } }` |
+| `enableKeyRotation` | Boolean | Enable automatic key rotation | `false` |
+| `keyRotationInterval` | Number | Interval for key rotation in ms | `24 * 60 * 60 * 1000` |
+
+### Logging and Monitoring
+
+The package includes built-in logging capabilities:
+
+```javascript
+// Configure logging
+const jwtManager = new JWTManager({
+    auditLogger: {
+        log: (eventType, data) => {
+            console.log(`[AUDIT] ${eventType}:`, data);
+        }
+    }
+});
+```
+
+### Fallback Mechanisms
+
+The package includes automatic fallback to MemoryAdapter if Redis/MongoDB is unavailable:
+
+```javascript
+async function createAdapter(redis) {
+    if (!redis) {
+        console.log('Using MemoryAdapter as fallback');
+        return new MemoryAdapter();
+    }
+
+    try {
+        await redis.ping();
+        return new RedisAdapter(redis);
+    } catch (error) {
+        console.log('Redis connection failed, using MemoryAdapter');
+        return new MemoryAdapter();
+    }
+}
+```
+
+### Connection Management
+
+```javascript
+const config = {
+    mongodb: {
+        uri: process.env.MONGODB_URI,
+        dbName: 'jwt-tests',
+        collection: 'tokens',
+        options: {
+            serverApi: { version: '1', strict: true },
+            writeConcern: { w: 1 },
+            retryWrites: true
+        }
+    },
+    redis: {
+        host: process.env.REDIS_HOST,
+        port: 6379,
+        connectTimeout: 10000,
+        retryStrategy: (times) => Math.min(times * 100, 2000)
+    }
+};
+```
+
+### Error Handling and Recovery
+
+The package includes comprehensive error handling:
+
+```javascript
+process.on('unhandledRejection', (error) => {
+    console.log('Unhandled Rejection', {
+        error: error.message,
+        stack: error.stack
+    });
+});
+
+// Cleanup on errors
+try {
+    // ... operations
+} catch (error) {
+    await jwtManager.cleanup();
+    throw error;
+} finally {
+    await mongoClient.close();
+    await redis.quit();
+}
+```
+
+These advanced features provide robust token management, session control, and security features for production applications. The integration tests demonstrate real-world usage scenarios and best practices for implementing JWT-based authentication.
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit bug reports, feature requests, or pull requests.
